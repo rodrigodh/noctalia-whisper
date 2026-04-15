@@ -1,0 +1,42 @@
+{
+  "id": "whisper",
+  "name": "Whisper",
+  "version": "1.0.0",
+  "minNoctaliaVersion": "4.1.2",
+  "author": "rodrigodh",
+  "license": "MIT",
+  "description": "Voice-activated AI assistant. Speak and get instant AI responses.",
+  "tags": [
+    "Bar",
+    "Panel",
+    "AI",
+    "Voice",
+    "Productivity"
+  ],
+  "entryPoints": {
+    "main": "Main.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml",
+    "settings": "Settings.qml"
+  },
+  "dependencies": {
+    "plugins": []
+  },
+  "metadata": {
+    "defaultSettings": {
+      "sttProvider": "groq",
+      "llmProvider": "groq",
+      "llmModel": "",
+      "apiKeys": {},
+      "temperature": 0.7,
+      "systemPrompt": "You are a helpful voice assistant integrated into a Linux desktop shell. Be concise and clear. The user is speaking to you via voice, so keep responses brief and conversational.",
+      "language": "en",
+      "maxHistoryLength": 50,
+      "autoStopSilence": false,
+      "panelDetached": true,
+      "panelPosition": "center",
+      "panelHeightRatio": 0.75,
+      "panelWidth": 520
+    }
+  }
+}
