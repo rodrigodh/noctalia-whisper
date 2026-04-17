@@ -57,17 +57,24 @@ bindsym $mod+Shift+w exec qs -c noctalia-shell ipc call plugin:whisper toggle
 
 ## Tuning Live mode
 
-Live mode uses **Voice Activity Detection** (silence threshold + pause duration) to decide when you've finished speaking. If it feels wrong, three sliders in **Settings > Plugins > Whisper > Live Mode** control it:
+Live mode uses **Voice Activity Detection** (silence threshold + pause duration) to decide when you've finished speaking. If it feels wrong, four sliders in **Settings > Plugins > Whisper > Live Mode** control it:
 
 | Setting | Default | What it does | When to change |
 | --- | --- | --- | --- |
-| Silence threshold | -18 dB | Audio quieter than this counts as silence. | Laptop mic w/ high noise floor: move toward 0 (e.g. -15). Quiet room + good mic: move toward -30. |
-| Pause duration | 1.0 s | How long to stay silent before the assistant answers. | Too slow: lower to 0.7 s. Cuts you off: raise to 1.5 s. |
-| Min speech length | 0.5 s | Ignore speech bursts shorter than this. | Filters coughs, clicks, short "uhh". Rarely needs changing. |
+| Silence threshold | -15 dB | Audio quieter than this counts as silence. | Assistant never answers: push toward 0 dB (e.g. -12). Cuts you off mid-sentence: push toward -30 dB. Sweet spot is mic-dependent. |
+| Pause duration | 0.7 s | How long to stay silent before the assistant answers. | Too eager: raise to 1.0–1.5 s. Too slow: lower to 0.5 s (not below — Whisper rejects chunks under ~0.3 s). |
+| Min speech length | 0.7 s | Ignore speech bursts shorter than this. | Filters coughs, clicks, short "uhh". Rarely needs changing. |
+| Max speech length | 12 s | Safety net: force a chunk break after this many seconds of continuous speech. | If you regularly talk in one long stream: raise to 20–30 s. If Whisper produces garbled long transcripts: lower to 8 s. |
 
-**If the assistant never answers**, the threshold is too low (silence is never detected). Check logs — you should see `VAD: silence_end @ N.NNs` and `VAD: silence_start @ N.NNs` events when you talk and pause.
+Diagnostics are in the shell log — look for `VAD: silence_end @ N.NNs`, `VAD: silence_start @ N.NNs`, `Queued chunk …`, and `VAD: force break at …s`.
 
-**If the assistant answers mid-sentence**, raise Pause duration. If it answers with nonsense / a lone "." it transcribed noise — raise Min speech length or Silence threshold.
+**If the assistant never answers** and you only see `VAD: force break` (never real silence events): your pause ambient noise is above the threshold. Raise Silence threshold toward 0 dB.
+
+**If it cuts you mid-sentence**: lower Silence threshold (more negative) or raise Pause duration.
+
+**If transcripts are garbled / repeating**: Whisper is hallucinating on a long chunk. Lower Max speech length.
+
+**If it answers with just `.` or `you`**: the hallucination filter missed a phantom. Send the exact transcript — we'll add it to the filter list.
 
 ## AI Providers
 
@@ -116,9 +123,12 @@ export WHISPER_GOOGLE_API_KEY="AI..."
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | Panel shows `!!panel.title!!` literals | i18n load failure in Noctalia | Check `i18n/en.json` is present in the installed plugin dir; the plugin has a fallback helper so most strings still read normally. |
-| Live starts but nothing happens when I pause | Silence threshold too low for your mic | Raise toward 0 dB in Settings. Check logs for `VAD: silence_...` events. |
-| Assistant answers with just `.` | Noise transcribed as near-silence by Whisper | Raise Silence threshold or increase Min speech length. |
-| `Audio file is too short` in logs | A very short burst slipped through as a chunk | Raise Min speech length to 0.7 s. |
+| Live starts but nothing happens when I pause | Silence threshold too low for your mic | Raise toward 0 dB in Settings. Check logs for `VAD: silence_end/start` events (real pauses) vs `VAD: force break` (only the safety net firing). |
+| Every chunk is a `VAD: force break` | Ambient noise stays above silence threshold during pauses | Raise Silence threshold toward 0 dB (e.g. -12). |
+| Assistant answers with just `.` or `you` | Whisper hallucinated on a near-silent chunk; filter missed it | Raise Min speech length. Report the exact transcript. |
+| Transcripts are nonsense / repeated sentences | Chunk too long; Whisper hallucinated | Lower Max speech length. Find the knob in Settings. |
+| `Audio file is too short` in logs | Should be fixed post-1.1 — tell us if it resurfaces. | Raise Min speech length as a workaround. |
+| Mic stays hot after closing panel | Stale process from an earlier crash | `pkill -f whisper-live` once; shouldn't happen in normal operation. |
 
 ## Architecture
 

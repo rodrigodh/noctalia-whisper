@@ -47,10 +47,12 @@ pw-record --media-category Capture --rate 16000 --channels 1 /tmp/whisper-live-<
 
 # VAD monitor — ffmpeg with null sink, events on stderr
 ffmpeg -hide_banner -loglevel info -nostats \
-       -f pulse -i default -ar 16000 -ac 1 \
-       -af silencedetect=noise=<db>dB:d=<sec> \
+       -f pulse -i default -ar 16000 \
+       -af "aformat=channel_layouts=mono,highpass=f=100,silencedetect=noise=<db>dB:d=<sec>" \
        -f null -
 ```
+
+The VAD filter chain matters: `aformat=mono` downmixes before silencedetect so a single noisy stereo channel doesn't prevent silence detection; `highpass=100` removes the low-frequency rumble (fan/HVAC/desk hum) that on laptop mics sits right around the silence threshold and can keep levels above it during real pauses. Dropping either filter causes "assistant never answers; only force-break fires" in real-world environments.
 
 ### Silence events → speech chunks
 
@@ -142,11 +144,13 @@ function t(key, fallback) {
 
 ## Known limitations
 
-- **VAD threshold is mic-dependent.** Default -18 dB targets laptop mics; external/condenser mics want -25 to -30 dB. Exposed as a setting.
-- **Whisper hallucinates on silent chunks.** Sometimes returns a lone `.` or `you` when the chunk contains only low-level noise. Mitigation: raise Min speech length. Long-term: post-filter extremely short transcripts.
+- **VAD threshold is mic-dependent.** Default -15 dB targets typical laptop mics; external/condenser mics in quiet rooms usually want -25 to -30 dB. Exposed as a setting.
+- **Whisper hallucinates on silent chunks.** Sometimes returns a lone `.` or `you` when the chunk contains only low-level noise. Filtered by `Logic.isLikelyHallucination()` but the list isn't exhaustive.
+- **Force-break is blunt.** When continuous speech exceeds `vadMaxSpeechSec`, the chunk break may cut mid-word. Mitigation would be smarter energy-based breakpoint detection; current approach prioritises simplicity.
 - **No barge-in.** The LLM can't be interrupted by your next question while it's still streaming; the new chunk queues.
 - **No TTS.** Answers are shown on screen; nothing is spoken back.
 - **One shell, one mic.** Live mode reads `-f pulse -i default`; no device picker yet.
+- **Two-process clock drift.** pw-record and the ffmpeg VAD have independent timelines; typical drift is <100 ms. Chunk boundaries are off by roughly that much. Imperceptible in practice.
 
 ## Extending
 
