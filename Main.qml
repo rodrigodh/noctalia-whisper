@@ -73,8 +73,8 @@ Item {
 
   // Live/VAD config (with manifest defaults as fallback)
   readonly property bool liveModeDefault: pluginApi?.pluginSettings?.liveMode ?? true
-  readonly property real vadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -18
-  readonly property real vadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
+  readonly property real vadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -15
+  readonly property real vadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 0.7
   readonly property real vadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.7
   readonly property real vadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 12.0
 

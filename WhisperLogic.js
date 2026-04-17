@@ -347,14 +347,21 @@ function buildSessionRecorderCommand(sessionFilePath) {
 
 function buildVadMonitorCommand(silenceDb, silenceSec) {
   var db = (silenceDb !== undefined && silenceDb !== null) ? silenceDb : -18;
-  var sec = (silenceSec !== undefined && silenceSec !== null) ? silenceSec : 1.0;
-  var filter = "silencedetect=noise=" + db + "dB:d=" + sec;
+  var sec = (silenceSec !== undefined && silenceSec !== null) ? silenceSec : 0.7;
+  // Filter chain:
+  //   aformat=mono  — downmix stereo pulse input to mono so one noisy channel
+  //                   doesn't prevent silencedetect from firing
+  //   highpass 100Hz — cut fan/HVAC/room-rumble below speech range so ambient
+  //                    low-frequency noise doesn't keep levels above threshold
+  //   silencedetect — emit silence_start/silence_end on stderr
+  var filter = "aformat=channel_layouts=mono,highpass=f=100,"
+             + "silencedetect=noise=" + db + "dB:d=" + sec;
   return {
     args: [
       "ffmpeg", "-hide_banner", "-loglevel", "info",
       "-nostats",
       "-f", "pulse", "-i", "default",
-      "-ar", "16000", "-ac", "1",
+      "-ar", "16000",
       "-af", filter,
       "-f", "null", "-"
     ]
