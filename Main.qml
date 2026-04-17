@@ -10,7 +10,7 @@ Item {
   property var pluginApi: null
 
   // =====================
-  // Recording State
+  // Legacy PTT State (kept for the `record` IPC)
   // =====================
   property bool isRecording: false
   property bool recordingCancelled: false
@@ -18,11 +18,30 @@ Item {
   property string recordingFilePath: "/tmp/whisper-recording-" + Date.now() + ".wav"
 
   // =====================
+  // Live Mode State
+  // =====================
+  property bool isLive: false
+  property string liveSessionFilePath: ""
+  property real liveSessionStartMs: 0
+  // Seconds-from-start where the current speech burst began.
+  // -1 means "no confirmed speech since the last chunk was cut".
+  property real lastSilenceEndTime: -1
+  property int liveChunkCounter: 0
+  property var pendingChunks: []           // queue of { path, startSec, endSec }
+  property bool isChunkPipelineBusy: false
+  property string lastHeardText: ""
+  property bool liveFailed: false
+
+  // =====================
   // Transcription State
   // =====================
   property bool isTranscribing: false
   property string transcribedText: ""
   property string transcriptionError: ""
+  // Tracks which file to delete after transcription + what to do with the text.
+  // "legacy" = PTT flow (from recordingFilePath); "live" = live chunk (from pendingChunks).
+  property string _transcribeSource: "legacy"
+  property string _transcribingFilePath: ""
 
   // =====================
   // AI Chat State
@@ -46,9 +65,17 @@ Item {
     var config = Logic.LlmProviderConfig[llmProvider];
     return config ? config.defaultModel : "";
   }
-  readonly property real temperature: pluginApi?.pluginSettings?.temperature || 0.7
-  readonly property string systemPrompt: pluginApi?.pluginSettings?.systemPrompt || ""
+  readonly property real temperature: pluginApi?.pluginSettings?.temperature || 0.5
+  readonly property string systemPrompt: pluginApi?.pluginSettings?.systemPrompt
+                                        || pluginApi?.manifest?.metadata?.defaultSettings?.systemPrompt
+                                        || ""
   readonly property string language: pluginApi?.pluginSettings?.language || "en"
+
+  // Live/VAD config (with manifest defaults as fallback)
+  readonly property bool liveModeDefault: pluginApi?.pluginSettings?.liveMode ?? true
+  readonly property real vadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -18
+  readonly property real vadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
+  readonly property real vadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.5
 
   // API Keys - env vars take priority
   readonly property string envGroqKey: Quickshell.env("WHISPER_GROQ_API_KEY") || ""
@@ -56,17 +83,20 @@ Item {
   readonly property string envGoogleKey: Quickshell.env("WHISPER_GOOGLE_API_KEY") || ""
 
   function getApiKey(provider) {
-    // Env var priority
     if (provider === "groq" && envGroqKey !== "") return envGroqKey;
     if (provider === "anthropic" && envAnthropicKey !== "") return envAnthropicKey;
     if (provider === "google" && envGoogleKey !== "") return envGoogleKey;
-    // Settings
     var keys = pluginApi?.pluginSettings?.apiKeys || {};
     return keys[provider] || "";
   }
 
   readonly property string sttApiKey: getApiKey(sttProvider)
   readonly property string llmApiKey: getApiKey(llmProvider)
+
+  // i18n helper — Noctalia's tr() returns "!!key!!" on miss; collapse that to fallback.
+  function t(key, fallback) {
+    return Logic.cleanTr(pluginApi ? pluginApi.tr(key) : null, fallback);
+  }
 
   // =====================
   // Cache
@@ -77,6 +107,10 @@ Item {
   Component.onCompleted: {
     Logger.i("Whisper", "Plugin initialized");
     ensureCacheDir();
+  }
+
+  Component.onDestruction: {
+    if (root.isLive) stopLive();
   }
 
   function ensureCacheDir() {
@@ -138,50 +172,45 @@ Item {
   }
 
   // =====================
-  // Recording Timer
+  // Recording Duration Timer (used by both PTT and Live)
   // =====================
   Timer {
     id: recordingTimer
     interval: 100
     repeat: true
-    running: root.isRecording
+    running: root.isRecording || root.isLive
     onTriggered: {
       root.recordingDuration += 0.1;
     }
   }
 
   // =====================
-  // Audio Recording Process (pw-record)
+  // Legacy PTT Recording (pw-record)
   // =====================
   Process {
     id: recordProcess
     command: ["pw-record", "--media-category", "Capture", "--rate", "16000", "--channels", "1", root.recordingFilePath]
 
     onExited: function (exitCode, exitStatus) {
-      Logger.i("Whisper", "Recording process exited: code=" + exitCode);
-      if (root.isRecording) {
-        root.isRecording = false;
-      }
-      // Skip transcription if recording was cancelled (e.g. panel closed)
+      Logger.i("Whisper", "PTT recording process exited: code=" + exitCode);
+      if (root.isRecording) root.isRecording = false;
       if (root.recordingCancelled) {
         root.recordingCancelled = false;
-        cleanupRecording();
+        cleanupLegacyRecording();
         return;
       }
-      // After recording stops, start transcription
       if (root.recordingDuration > 0.3) {
-        root.startTranscription();
+        root.startLegacyTranscription();
       } else {
-        Logger.w("Whisper", "Recording too short, skipping transcription");
-        cleanupRecording();
+        Logger.w("Whisper", "PTT recording too short, skipping transcription");
+        cleanupLegacyRecording();
       }
     }
   }
 
   function startRecording() {
-    if (root.isRecording) return;
+    if (root.isRecording || root.isLive) return;
 
-    // Generate a unique file path for this recording
     root.recordingFilePath = "/tmp/whisper-recording-" + Date.now() + ".wav";
     root.recordingDuration = 0;
     root.recordingCancelled = false;
@@ -190,15 +219,14 @@ Item {
     root.errorMessage = "";
     root.isRecording = true;
 
-    Logger.i("Whisper", "Starting recording: " + root.recordingFilePath);
+    Logger.i("Whisper", "Starting PTT recording: " + root.recordingFilePath);
     recordProcess.command = ["pw-record", "--media-category", "Capture", "--rate", "16000", "--channels", "1", root.recordingFilePath];
     recordProcess.running = true;
   }
 
   function stopRecording() {
     if (!root.isRecording) return;
-
-    Logger.i("Whisper", "Stopping recording (duration: " + root.recordingDuration.toFixed(1) + "s)");
+    Logger.i("Whisper", "Stopping PTT recording (" + root.recordingDuration.toFixed(1) + "s)");
     root.isRecording = false;
     recordProcess.running = false;
   }
@@ -210,12 +238,196 @@ Item {
     recordProcess.running = false;
   }
 
-  function cleanupRecording() {
+  function cleanupLegacyRecording() {
     Quickshell.execDetached(["rm", "-f", root.recordingFilePath]);
   }
 
+  function startLegacyTranscription() {
+    if (!sttApiKey || sttApiKey.trim() === "") {
+      root.transcriptionError = root.t("errors.noSttKey", "No STT API key configured");
+      cleanupLegacyRecording();
+      return;
+    }
+    root._transcribeSource = "legacy";
+    root._transcribingFilePath = root.recordingFilePath;
+    root.isTranscribing = true;
+    root.transcriptionError = "";
+
+    var cmd = Logic.buildWhisperCommand(root.recordingFilePath, sttApiKey, language);
+    Logger.i("Whisper", "Starting PTT transcription");
+    transcribeProcess.command = cmd.args;
+    transcribeProcess.running = true;
+  }
+
   // =====================
-  // Speech-to-Text Transcription
+  // Live Mode: single ffmpeg (record + silencedetect)
+  // =====================
+  Process {
+    id: livePipelineProcess
+
+    // silencedetect logs go to stderr — parse line-by-line in real time.
+    stderr: SplitParser {
+      onRead: function (data) {
+        var evt = Logic.parseSilenceEvent(data);
+        if (evt) root.handleSilenceEvent(evt);
+      }
+    }
+
+    onExited: function (exitCode, exitStatus) {
+      Logger.i("Whisper", "Live pipeline exited: code=" + exitCode);
+      var wasLive = root.isLive;
+      root.isLive = false;
+      // If ffmpeg died unexpectedly while we thought we were live, surface an error.
+      if (wasLive && exitCode !== 0) {
+        root.liveFailed = true;
+        root.errorMessage = root.t("toast.liveFailed", "Live mode failed");
+        ToastService.showError(root.errorMessage);
+      }
+      // Leave session file around briefly in case extract is still running, then clean.
+      Qt.callLater(function () {
+        if (root.liveSessionFilePath) {
+          Quickshell.execDetached(["rm", "-f", root.liveSessionFilePath]);
+          root.liveSessionFilePath = "";
+        }
+      });
+    }
+  }
+
+  function startLive() {
+    if (root.isLive) return;
+    if (root.isRecording) stopRecording();
+
+    if (!sttApiKey || sttApiKey.trim() === "") {
+      root.transcriptionError = root.t("errors.noSttKey", "No STT API key configured");
+      ToastService.showError(root.transcriptionError);
+      return;
+    }
+
+    var ts = Date.now();
+    root.liveSessionFilePath = "/tmp/whisper-live-" + ts + ".wav";
+    root.liveSessionStartMs = ts;
+    root.lastSilenceEndTime = -1;
+    root.liveChunkCounter = 0;
+    root.pendingChunks = [];
+    root.isChunkPipelineBusy = false;
+    root.liveFailed = false;
+    root.recordingDuration = 0;
+    root.transcribedText = "";
+    root.transcriptionError = "";
+    root.errorMessage = "";
+    root.lastHeardText = "";
+    root.isLive = true;
+
+    var cmd = Logic.buildLivePipelineCommand(root.liveSessionFilePath,
+                                             root.vadSilenceDb,
+                                             root.vadSilenceSec);
+    Logger.i("Whisper", "Starting Live pipeline → " + root.liveSessionFilePath);
+    livePipelineProcess.command = cmd.args;
+    livePipelineProcess.running = true;
+    ToastService.showNotice(root.t("toast.liveStarted", "Live mode on"));
+  }
+
+  function stopLive() {
+    if (!root.isLive && !livePipelineProcess.running) return;
+    Logger.i("Whisper", "Stopping Live pipeline");
+    root.isLive = false;
+    // Drop any queued chunks that haven't started yet.
+    root.pendingChunks = [];
+    livePipelineProcess.running = false;
+    ToastService.showNotice(root.t("toast.liveStopped", "Live mode off"));
+  }
+
+  function toggleLive() {
+    if (root.isLive) stopLive();
+    else startLive();
+  }
+
+  // Called from livePipelineProcess.stderr
+  function handleSilenceEvent(evt) {
+    Logger.i("Whisper", "VAD: silence_" + evt.type + " @ " + evt.time.toFixed(2) + "s");
+    if (evt.type === "end") {
+      // Speech just started (silence ended).
+      root.lastSilenceEndTime = evt.time;
+    } else if (evt.type === "start") {
+      // Speech just ended (silence started).
+      if (root.lastSilenceEndTime < 0) return; // no speech yet
+      var speechStart = root.lastSilenceEndTime;
+      var speechEnd = evt.time;
+      root.lastSilenceEndTime = -1;
+      var dur = speechEnd - speechStart;
+      if (dur < root.vadMinSpeechSec) {
+        Logger.w("Whisper", "VAD: dropped short burst (" + dur.toFixed(2) + "s < minSpeech " + root.vadMinSpeechSec + "s)");
+        return;
+      }
+      var chunkPath = "/tmp/whisper-live-chunk-" + root.liveSessionStartMs + "-" + root.liveChunkCounter + ".wav";
+      root.liveChunkCounter += 1;
+      root.pendingChunks = [...root.pendingChunks, {
+        path: chunkPath,
+        startSec: speechStart,
+        endSec: speechEnd
+      }];
+      Logger.i("Whisper", "Queued chunk " + root.liveChunkCounter + " [" + speechStart.toFixed(2) + "→" + speechEnd.toFixed(2) + "]");
+      processNextChunk();
+    }
+  }
+
+  function processNextChunk() {
+    if (root.isChunkPipelineBusy) return;
+    if (root.pendingChunks.length === 0) return;
+    // Serialize: wait for any in-flight transcription, PTT, or LLM response
+    // before starting the next chunk. Keeps output strictly sequential.
+    if (root.isTranscribing || root.isRecording || root.isGenerating) return;
+
+    var chunk = root.pendingChunks[0];
+    root.pendingChunks = root.pendingChunks.slice(1);
+    root.isChunkPipelineBusy = true;
+
+    var cmd = Logic.buildChunkExtractCommand(root.liveSessionFilePath,
+                                             chunk.path,
+                                             chunk.startSec,
+                                             chunk.endSec);
+    chunkExtractProcess._pendingChunkPath = chunk.path;
+    chunkExtractProcess.command = cmd.args;
+    chunkExtractProcess.running = true;
+  }
+
+  Process {
+    id: chunkExtractProcess
+    property string _pendingChunkPath: ""
+
+    stderr: StdioCollector {
+      onStreamFinished: {
+        if (text && text.trim() !== "") {
+          Logger.w("Whisper", "chunk-extract stderr: " + text);
+        }
+      }
+    }
+
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode !== 0 || !_pendingChunkPath) {
+        Logger.e("Whisper", "Chunk extract failed (code=" + exitCode + ")");
+        root.isChunkPipelineBusy = false;
+        Quickshell.execDetached(["rm", "-f", _pendingChunkPath]);
+        _pendingChunkPath = "";
+        // Try next queued chunk anyway.
+        root.processNextChunk();
+        return;
+      }
+
+      // Hand off to transcription.
+      root._transcribeSource = "live";
+      root._transcribingFilePath = _pendingChunkPath;
+      root.isTranscribing = true;
+      root.transcriptionError = "";
+      var cmd = Logic.buildWhisperCommand(_pendingChunkPath, root.sttApiKey, root.language);
+      transcribeProcess.command = cmd.args;
+      transcribeProcess.running = true;
+      _pendingChunkPath = "";
+    }
+  }
+
+  // =====================
+  // Transcription Process (shared by PTT and Live)
   // =====================
   Process {
     id: transcribeProcess
@@ -238,47 +450,62 @@ Item {
       if (exitCode !== 0 && root.transcribedText === "") {
         root.isTranscribing = false;
         if (root.transcriptionError === "") {
-          root.transcriptionError = pluginApi?.tr("errors.transcriptionFailed") || "Transcription failed";
+          root.transcriptionError = root.t("errors.transcriptionFailed", "Transcription failed");
         }
-        cleanupRecording();
+        cleanupTranscribeFile();
+        // Unblock live pipeline if this was a live chunk.
+        if (root._transcribeSource === "live") {
+          root.isChunkPipelineBusy = false;
+          root.processNextChunk();
+        }
       }
     }
   }
 
-  function startTranscription() {
-    if (!sttApiKey || sttApiKey.trim() === "") {
-      root.transcriptionError = pluginApi?.tr("errors.noSttKey") || "No STT API key configured";
-      cleanupRecording();
-      return;
+  function cleanupTranscribeFile() {
+    if (root._transcribingFilePath) {
+      Quickshell.execDetached(["rm", "-f", root._transcribingFilePath]);
+      root._transcribingFilePath = "";
     }
-
-    root.isTranscribing = true;
-    root.transcriptionError = "";
-
-    var cmd = Logic.buildWhisperCommand(root.recordingFilePath, sttApiKey, language);
-    Logger.i("Whisper", "Starting transcription");
-    transcribeProcess.command = cmd.args;
-    transcribeProcess.running = true;
   }
 
   function handleTranscriptionResult(responseText) {
     root.isTranscribing = false;
-    cleanupRecording();
+    var source = root._transcribeSource;
+    cleanupTranscribeFile();
 
     var result = Logic.parseWhisperResponse(responseText);
     if (result.error) {
       root.transcriptionError = result.error;
       Logger.e("Whisper", "Transcription error: " + result.error);
+      if (source === "live") {
+        root.isChunkPipelineBusy = false;
+        root.processNextChunk();
+      }
       return;
     }
 
-    if (result.text && result.text.trim() !== "") {
-      root.transcribedText = result.text;
-      Logger.i("Whisper", "Transcription: " + result.text);
-      // Automatically send to LLM
-      sendMessage(result.text);
+    var text = (result.text || "").trim();
+    if (text === "") {
+      if (source === "live") {
+        Logger.d("Whisper", "Live chunk produced empty transcript; skipping");
+        root.isChunkPipelineBusy = false;
+        root.processNextChunk();
+      } else {
+        root.transcriptionError = root.t("errors.noSpeechDetected", "No speech detected");
+      }
+      return;
+    }
+
+    if (source === "live") {
+      root.lastHeardText = text;
+      Logger.i("Whisper", "Live transcript: " + text);
+      // Fire LLM. The queue continues from the LLM onExited hook.
+      root.sendMessage(text);
     } else {
-      root.transcriptionError = pluginApi?.tr("errors.noSpeechDetected") || "No speech detected";
+      root.transcribedText = text;
+      Logger.i("Whisper", "PTT transcript: " + text);
+      root.sendMessage(text);
     }
   }
 
@@ -305,11 +532,24 @@ Item {
 
   function sendMessage(userMessage) {
     if (!userMessage || userMessage.trim() === "") return;
-    if (root.isGenerating) return;
+    if (root.isGenerating) {
+      // User-typed message raced with an in-flight LLM response.
+      // Drop the incoming text and unblock the live queue so the next chunk
+      // can proceed after the current generation completes.
+      Logger.w("Whisper", "Dropping message; generation already in progress");
+      if (root._transcribeSource === "live") {
+        root.isChunkPipelineBusy = false;
+      }
+      return;
+    }
 
     if (!llmApiKey || llmApiKey.trim() === "") {
-      root.errorMessage = pluginApi?.tr("errors.noLlmKey") || "No LLM API key configured";
+      root.errorMessage = root.t("errors.noLlmKey", "No LLM API key configured");
       ToastService.showError(root.errorMessage);
+      // If this was a live chunk, unblock the queue.
+      if (root._transcribeSource === "live") {
+        root.isChunkPipelineBusy = false;
+      }
       return;
     }
 
@@ -329,6 +569,9 @@ Item {
     } else {
       root.errorMessage = "Unknown LLM provider: " + llmProvider;
       root.isGenerating = false;
+      if (root._transcribeSource === "live") {
+        root.isChunkPipelineBusy = false;
+      }
     }
   }
 
@@ -355,6 +598,16 @@ Item {
       root.addMessage("assistant", root.currentResponse.trim());
     }
     root.currentResponse = "";
+    // Advance live queue even if user stopped mid-generation.
+    afterLlmDone();
+  }
+
+  // Hook called at the end of every LLM run (success, failure, or stop).
+  function afterLlmDone() {
+    if (root.isLive || root._transcribeSource === "live") {
+      root.isChunkPipelineBusy = false;
+      root.processNextChunk();
+    }
   }
 
   // =====================
@@ -402,13 +655,15 @@ Item {
       root.isGenerating = false;
       groqProcess.buffer = "";
       if (exitCode !== 0 && root.currentResponse === "") {
-        if (root.errorMessage === "") root.errorMessage = pluginApi?.tr("errors.requestFailed") || "Request failed";
+        if (root.errorMessage === "") root.errorMessage = root.t("errors.requestFailed", "Request failed");
+        root.afterLlmDone();
         return;
       }
       if (root.currentResponse.trim() !== "") {
         root.addMessage("assistant", root.currentResponse.trim());
       }
       root.currentResponse = "";
+      root.afterLlmDone();
     }
   }
 
@@ -467,13 +722,15 @@ Item {
       root.isGenerating = false;
       anthropicProcess.buffer = "";
       if (exitCode !== 0 && root.currentResponse === "") {
-        if (root.errorMessage === "") root.errorMessage = pluginApi?.tr("errors.requestFailed") || "Request failed";
+        if (root.errorMessage === "") root.errorMessage = root.t("errors.requestFailed", "Request failed");
+        root.afterLlmDone();
         return;
       }
       if (root.currentResponse.trim() !== "") {
         root.addMessage("assistant", root.currentResponse.trim());
       }
       root.currentResponse = "";
+      root.afterLlmDone();
     }
   }
 
@@ -534,13 +791,15 @@ Item {
       root.isGenerating = false;
       geminiProcess.buffer = "";
       if (exitCode !== 0 && root.currentResponse === "") {
-        if (root.errorMessage === "") root.errorMessage = pluginApi?.tr("errors.requestFailed") || "Request failed";
+        if (root.errorMessage === "") root.errorMessage = root.t("errors.requestFailed", "Request failed");
+        root.afterLlmDone();
         return;
       }
       if (root.currentResponse.trim() !== "") {
         root.addMessage("assistant", root.currentResponse.trim());
       }
       root.currentResponse = "";
+      root.afterLlmDone();
     }
   }
 
@@ -554,15 +813,18 @@ Item {
   }
 
   // =====================
-  // Toggle Recording (main action)
+  // Primary toggle (keybind-facing)
   // =====================
-  function toggleRecording() {
-    if (root.isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
+  // If anything is active, stop it. Otherwise, start Live (or PTT if Live is disabled).
+  function primaryToggle() {
+    if (root.isLive) { stopLive(); return; }
+    if (root.isRecording) { stopRecording(); return; }
+    if (root.liveModeDefault) startLive();
+    else startRecording();
   }
+
+  // Back-compat alias so Panel buttons / old bindings still work.
+  function toggleRecording() { primaryToggle(); }
 
   // =====================
   // IPC Handlers
@@ -571,19 +833,11 @@ Item {
     target: "plugin:whisper"
 
     function toggle() {
-      if (pluginApi) {
-        pluginApi.withCurrentScreen(function (screen) {
-          pluginApi.openPanel(screen);
-        });
-        // Start recording if not already
-        if (!root.isRecording && !root.isTranscribing && !root.isGenerating) {
-          Qt.callLater(function() {
-            root.startRecording();
-          });
-        } else if (root.isRecording) {
-          root.stopRecording();
-        }
-      }
+      if (!pluginApi) return;
+      pluginApi.withCurrentScreen(function (screen) {
+        pluginApi.openPanel(screen);
+      });
+      Qt.callLater(function () { root.primaryToggle(); });
     }
 
     function open() {
@@ -595,27 +849,33 @@ Item {
     }
 
     function close() {
-      if (pluginApi) {
-        if (root.isRecording) root.cancelRecording();
-        pluginApi.withCurrentScreen(function (screen) {
-          pluginApi.closePanel(screen);
-        });
-      }
+      if (!pluginApi) return;
+      if (root.isLive) root.stopLive();
+      if (root.isRecording) root.cancelRecording();
+      pluginApi.withCurrentScreen(function (screen) {
+        pluginApi.closePanel(screen);
+      });
+    }
+
+    function live() {
+      if (!pluginApi) return;
+      pluginApi.withCurrentScreen(function (screen) {
+        pluginApi.openPanel(screen);
+      });
+      Qt.callLater(function () { root.toggleLive(); });
     }
 
     function record() {
-      if (pluginApi) {
-        pluginApi.withCurrentScreen(function (screen) {
-          pluginApi.openPanel(screen);
-        });
-        Qt.callLater(function() {
-          root.startRecording();
-        });
-      }
+      if (!pluginApi) return;
+      pluginApi.withCurrentScreen(function (screen) {
+        pluginApi.openPanel(screen);
+      });
+      Qt.callLater(function () { root.startRecording(); });
     }
 
     function stop() {
-      root.stopRecording();
+      if (root.isLive) root.stopLive();
+      else if (root.isRecording) root.stopRecording();
     }
 
     function send(message: string) {
@@ -626,7 +886,7 @@ Item {
 
     function clear() {
       root.clearMessages();
-      ToastService.showNotice(pluginApi?.tr("toast.historyCleared") || "History cleared");
+      ToastService.showNotice(root.t("toast.historyCleared", "History cleared"));
     }
   }
 }

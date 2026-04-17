@@ -19,10 +19,16 @@ ColumnLayout {
   property string editLlmProvider: pluginApi?.pluginSettings?.llmProvider || "groq"
   property string editLlmModel: pluginApi?.pluginSettings?.llmModel || ""
   property var editApiKeys: pluginApi?.pluginSettings?.apiKeys || {}
-  property real editTemperature: pluginApi?.pluginSettings?.temperature || 0.7
+  property real editTemperature: pluginApi?.pluginSettings?.temperature ?? 0.5
   property string editSystemPrompt: pluginApi?.pluginSettings?.systemPrompt || pluginApi?.manifest?.metadata?.defaultSettings?.systemPrompt || ""
   property string editLanguage: pluginApi?.pluginSettings?.language || "en"
   property int editMaxHistoryLength: pluginApi?.pluginSettings?.maxHistoryLength || 50
+
+  // Live / VAD Settings
+  property bool editLiveMode: pluginApi?.pluginSettings?.liveMode ?? true
+  property real editVadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -30
+  property real editVadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
+  property real editVadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.5
 
   // Panel Settings
   property bool editPanelDetached: pluginApi?.pluginSettings?.panelDetached ?? true
@@ -42,6 +48,10 @@ ColumnLayout {
     return false;
   }
 
+  function t(key, fallback) {
+    return Logic.cleanTr(pluginApi ? pluginApi.tr(key) : null, fallback);
+  }
+
   spacing: Style.marginM
 
   Component.onCompleted: {
@@ -52,7 +62,7 @@ ColumnLayout {
   // STT Section
   // ==================
   NText {
-    text: pluginApi?.tr("settings.sttSection") || "Speech-to-Text"
+    text: root.t("settings.sttSection", "Speech-to-Text")
     pointSize: Style.fontSizeM
     font.weight: Font.Bold
     color: Color.mOnSurface
@@ -60,7 +70,7 @@ ColumnLayout {
 
   NText {
     Layout.fillWidth: true
-    text: pluginApi?.tr("settings.sttNote") || "Speech recognition is powered by Groq's Whisper API (free tier available)."
+    text: root.t("settings.sttNote", "Speech recognition is powered by Groq's Whisper API (free tier available).")
     color: Color.mOnSurfaceVariant
     pointSize: Style.fontSizeXS
     wrapMode: Text.Wrap
@@ -69,12 +79,12 @@ ColumnLayout {
   // Groq API Key (required for STT)
   NTextInput {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.groqApiKey") || "Groq API Key"
+    label: root.t("settings.groqApiKey", "Groq API Key")
     description: {
-      if (isKeyManagedByEnv("groq")) return pluginApi?.tr("settings.keyManagedByEnv") || "Managed via WHISPER_GROQ_API_KEY env variable";
-      return (pluginApi?.tr("settings.groqApiKeyDesc") || "Get your free key at") + ": " + Logic.LlmProviderConfig.groq.keyUrl;
+      if (isKeyManagedByEnv("groq")) return root.t("settings.keyManagedByEnv", "Managed via WHISPER_GROQ_API_KEY env variable");
+      return root.t("settings.groqApiKeyDesc", "Get your free key at") + ": " + Logic.LlmProviderConfig.groq.keyUrl;
     }
-    placeholderText: isKeyManagedByEnv("groq") ? (pluginApi?.tr("settings.envPlaceholder") || "Set via environment variable") : (pluginApi?.tr("settings.apiKeyPlaceholder") || "Enter API key...")
+    placeholderText: isKeyManagedByEnv("groq") ? root.t("settings.envPlaceholder", "Set via environment variable") : root.t("settings.apiKeyPlaceholder", "Enter API key...")
     text: isKeyManagedByEnv("groq") ? "" : (editApiKeys["groq"] || "")
     enabled: !isKeyManagedByEnv("groq")
     inputMethodHints: Qt.ImhHiddenText
@@ -88,8 +98,8 @@ ColumnLayout {
   // Language
   NComboBox {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.language") || "Speech Language"
-    description: pluginApi?.tr("settings.languageDesc") || "Language for speech recognition"
+    label: root.t("settings.language", "Speech Language")
+    description: root.t("settings.languageDesc", "Language for speech recognition")
     model: [
       { key: "en", name: "English" },
       { key: "es", name: "Spanish" },
@@ -120,7 +130,7 @@ ColumnLayout {
   // LLM Section
   // ==================
   NText {
-    text: pluginApi?.tr("settings.llmSection") || "AI Model"
+    text: root.t("settings.llmSection", "AI Model")
     pointSize: Style.fontSizeM
     font.weight: Font.Bold
     color: Color.mOnSurface
@@ -129,8 +139,8 @@ ColumnLayout {
   // LLM Provider
   NComboBox {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.llmProvider") || "AI Provider"
-    description: pluginApi?.tr("settings.llmProviderDesc") || "Choose which AI model to use for responses"
+    label: root.t("settings.llmProvider", "AI Provider")
+    description: root.t("settings.llmProviderDesc", "Choose which AI model to use for responses")
     model: [
       { key: "groq", name: "Groq (Free)" },
       { key: "anthropic", name: "Anthropic Claude" },
@@ -144,8 +154,8 @@ ColumnLayout {
   // Model name
   NTextInput {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.model") || "Model"
-    description: pluginApi?.tr("settings.modelDesc") || "Leave empty for default model"
+    label: root.t("settings.model", "Model")
+    description: root.t("settings.modelDesc", "Leave empty for default model")
     text: root.editLlmModel
     placeholderText: Logic.LlmProviderConfig[root.editLlmProvider]?.defaultModel || ""
     onTextChanged: root.editLlmModel = text
@@ -155,12 +165,12 @@ ColumnLayout {
   NTextInput {
     Layout.fillWidth: true
     visible: root.editLlmProvider === "anthropic"
-    label: pluginApi?.tr("settings.anthropicApiKey") || "Anthropic API Key"
+    label: root.t("settings.anthropicApiKey", "Anthropic API Key")
     description: {
-      if (isKeyManagedByEnv("anthropic")) return pluginApi?.tr("settings.keyManagedByEnv") || "Managed via WHISPER_ANTHROPIC_API_KEY env variable";
-      return (pluginApi?.tr("settings.anthropicApiKeyDesc") || "Get key at") + ": " + Logic.LlmProviderConfig.anthropic.keyUrl;
+      if (isKeyManagedByEnv("anthropic")) return root.t("settings.keyManagedByEnv", "Managed via WHISPER_ANTHROPIC_API_KEY env variable");
+      return root.t("settings.anthropicApiKeyDesc", "Get key at") + ": " + Logic.LlmProviderConfig.anthropic.keyUrl;
     }
-    placeholderText: isKeyManagedByEnv("anthropic") ? (pluginApi?.tr("settings.envPlaceholder") || "Set via environment variable") : (pluginApi?.tr("settings.apiKeyPlaceholder") || "Enter API key...")
+    placeholderText: isKeyManagedByEnv("anthropic") ? root.t("settings.envPlaceholder", "Set via environment variable") : root.t("settings.apiKeyPlaceholder", "Enter API key...")
     text: isKeyManagedByEnv("anthropic") ? "" : (editApiKeys["anthropic"] || "")
     enabled: !isKeyManagedByEnv("anthropic")
     inputMethodHints: Qt.ImhHiddenText
@@ -175,12 +185,12 @@ ColumnLayout {
   NTextInput {
     Layout.fillWidth: true
     visible: root.editLlmProvider === "google"
-    label: pluginApi?.tr("settings.googleApiKey") || "Google API Key"
+    label: root.t("settings.googleApiKey", "Google API Key")
     description: {
-      if (isKeyManagedByEnv("google")) return pluginApi?.tr("settings.keyManagedByEnv") || "Managed via WHISPER_GOOGLE_API_KEY env variable";
-      return (pluginApi?.tr("settings.googleApiKeyDesc") || "Get key at") + ": " + Logic.LlmProviderConfig.google.keyUrl;
+      if (isKeyManagedByEnv("google")) return root.t("settings.keyManagedByEnv", "Managed via WHISPER_GOOGLE_API_KEY env variable");
+      return root.t("settings.googleApiKeyDesc", "Get key at") + ": " + Logic.LlmProviderConfig.google.keyUrl;
     }
-    placeholderText: isKeyManagedByEnv("google") ? (pluginApi?.tr("settings.envPlaceholder") || "Set via environment variable") : (pluginApi?.tr("settings.apiKeyPlaceholder") || "Enter API key...")
+    placeholderText: isKeyManagedByEnv("google") ? root.t("settings.envPlaceholder", "Set via environment variable") : root.t("settings.apiKeyPlaceholder", "Enter API key...")
     text: isKeyManagedByEnv("google") ? "" : (editApiKeys["google"] || "")
     enabled: !isKeyManagedByEnv("google")
     inputMethodHints: Qt.ImhHiddenText
@@ -197,8 +207,8 @@ ColumnLayout {
     spacing: Style.marginS
 
     NLabel {
-      label: (pluginApi?.tr("settings.temperature") || "Temperature") + ": " + root.editTemperature.toFixed(1)
-      description: pluginApi?.tr("settings.temperatureDesc") || "Higher = more creative, Lower = more focused"
+      label: root.t("settings.temperature", "Temperature") + ": " + root.editTemperature.toFixed(1)
+      description: root.t("settings.temperatureDesc", "Higher = more creative, Lower = more focused")
     }
 
     NSlider {
@@ -217,13 +227,13 @@ ColumnLayout {
     spacing: Style.marginS
 
     NLabel {
-      label: pluginApi?.tr("settings.systemPrompt") || "System Prompt"
-      description: pluginApi?.tr("settings.systemPromptDesc") || "Instructions for the AI assistant"
+      label: root.t("settings.systemPrompt", "System Prompt")
+      description: root.t("settings.systemPromptDesc", "Instructions for the AI assistant")
     }
 
     Rectangle {
       Layout.fillWidth: true
-      Layout.preferredHeight: 100
+      Layout.preferredHeight: 140
       color: Color.mSurface
       radius: Style.radiusS
       border.color: Color.mOutline
@@ -233,7 +243,7 @@ ColumnLayout {
         anchors.fill: parent
         anchors.margins: Style.marginS
         text: root.editSystemPrompt
-        placeholderText: pluginApi?.tr("settings.systemPromptPlaceholder") || "You are a helpful assistant..."
+        placeholderText: root.t("settings.systemPromptPlaceholder", "You are a helpful assistant...")
         placeholderTextColor: Color.mOnSurfaceVariant
         color: Color.mOnSurface
         font.pointSize: Style.fontSizeS
@@ -250,8 +260,8 @@ ColumnLayout {
     spacing: Style.marginS
 
     NLabel {
-      label: (pluginApi?.tr("settings.maxHistory") || "Max History") + ": " + root.editMaxHistoryLength
-      description: pluginApi?.tr("settings.maxHistoryDesc") || "Maximum number of messages to keep in history"
+      label: root.t("settings.maxHistory", "Max History") + ": " + root.editMaxHistoryLength
+      description: root.t("settings.maxHistoryDesc", "Maximum number of messages to keep in history")
     }
 
     NSlider {
@@ -271,10 +281,10 @@ ColumnLayout {
   }
 
   // ==================
-  // Panel Section
+  // Live Mode Section
   // ==================
   NText {
-    text: pluginApi?.tr("settings.panelSection") || "Panel Layout"
+    text: root.t("settings.liveSection", "Live Mode")
     pointSize: Style.fontSizeM
     font.weight: Font.Bold
     color: Color.mOnSurface
@@ -282,8 +292,80 @@ ColumnLayout {
 
   NToggle {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.panelDetached") || "Detached Panel"
-    description: pluginApi?.tr("settings.panelDetachedDesc") || "Panel floats freely instead of attaching to bar"
+    label: root.t("settings.liveModeDefault", "Start in Live mode")
+    description: root.t("settings.liveModeDefaultDesc", "When enabled, the keybind (IPC 'toggle') auto-starts continuous listening. Requires ffmpeg + pulseaudio/PipeWire-pulse.")
+    checked: root.editLiveMode
+    onToggled: function (checked) { root.editLiveMode = checked; }
+    defaultValue: true
+  }
+
+  ColumnLayout {
+    Layout.fillWidth: true
+    spacing: Style.marginS
+
+    NLabel {
+      label: root.t("settings.vadSilenceDb", "Silence threshold") + ": " + root.editVadSilenceDb.toFixed(0) + " dB"
+      description: root.t("settings.vadSilenceDbDesc", "Quieter than this counts as silence. -15 = sensitive, -40 = needs clear voice.")
+    }
+
+    NSlider {
+      Layout.fillWidth: true
+      from: -60
+      to: -10
+      stepSize: 1
+      value: root.editVadSilenceDb
+      onValueChanged: root.editVadSilenceDb = value
+    }
+
+    NLabel {
+      label: root.t("settings.vadSilenceSec", "Pause duration") + ": " + root.editVadSilenceSec.toFixed(1) + "s"
+      description: root.t("settings.vadSilenceSecDesc", "How long you must pause before the assistant answers.")
+    }
+
+    NSlider {
+      Layout.fillWidth: true
+      from: 0.3
+      to: 3.0
+      stepSize: 0.1
+      value: root.editVadSilenceSec
+      onValueChanged: root.editVadSilenceSec = value
+    }
+
+    NLabel {
+      label: root.t("settings.vadMinSpeechSec", "Min speech length") + ": " + root.editVadMinSpeechSec.toFixed(1) + "s"
+      description: root.t("settings.vadMinSpeechSecDesc", "Ignore speech bursts shorter than this (filters coughs, clicks).")
+    }
+
+    NSlider {
+      Layout.fillWidth: true
+      from: 0.1
+      to: 2.0
+      stepSize: 0.1
+      value: root.editVadMinSpeechSec
+      onValueChanged: root.editVadMinSpeechSec = value
+    }
+  }
+
+  NDivider {
+    Layout.fillWidth: true
+    Layout.topMargin: Style.marginM
+    Layout.bottomMargin: Style.marginM
+  }
+
+  // ==================
+  // Panel Section
+  // ==================
+  NText {
+    text: root.t("settings.panelSection", "Panel Layout")
+    pointSize: Style.fontSizeM
+    font.weight: Font.Bold
+    color: Color.mOnSurface
+  }
+
+  NToggle {
+    Layout.fillWidth: true
+    label: root.t("settings.panelDetached", "Detached Panel")
+    description: root.t("settings.panelDetachedDesc", "Panel floats freely instead of attaching to bar")
     checked: root.editPanelDetached
     onToggled: function (checked) {
       root.editPanelDetached = checked;
@@ -296,8 +378,8 @@ ColumnLayout {
 
   NComboBox {
     Layout.fillWidth: true
-    label: pluginApi?.tr("settings.panelPosition") || "Panel Position"
-    description: pluginApi?.tr("settings.panelPositionDesc") || "Where the panel appears on screen"
+    label: root.t("settings.panelPosition", "Panel Position")
+    description: root.t("settings.panelPositionDesc", "Where the panel appears on screen")
     model: root.editPanelDetached ? [
       { key: "left", name: "Left" },
       { key: "center", name: "Center" },
@@ -318,8 +400,8 @@ ColumnLayout {
     spacing: Style.marginS
 
     NLabel {
-      label: (pluginApi?.tr("settings.panelHeightRatio") || "Panel Height") + ": " + (root.editPanelHeightRatio * 100).toFixed(0) + "%"
-      description: pluginApi?.tr("settings.panelHeightRatioDesc") || "Percentage of screen height"
+      label: root.t("settings.panelHeightRatio", "Panel Height") + ": " + (root.editPanelHeightRatio * 100).toFixed(0) + "%"
+      description: root.t("settings.panelHeightRatioDesc", "Percentage of screen height")
     }
 
     NSlider {
@@ -332,8 +414,8 @@ ColumnLayout {
     }
 
     NLabel {
-      label: (pluginApi?.tr("settings.panelWidth") || "Panel Width") + ": " + root.editPanelWidth + "px"
-      description: pluginApi?.tr("settings.panelWidthDesc") || "Width of the panel in pixels"
+      label: root.t("settings.panelWidth", "Panel Width") + ": " + root.editPanelWidth + "px"
+      description: root.t("settings.panelWidthDesc", "Width of the panel in pixels")
     }
 
     NSlider {
@@ -356,7 +438,7 @@ ColumnLayout {
   }
 
   NText {
-    text: pluginApi?.tr("settings.ipcSection") || "Keyboard Shortcut"
+    text: root.t("settings.ipcSection", "Keyboard Shortcut")
     pointSize: Style.fontSizeM
     font.weight: Font.Bold
     color: Color.mOnSurface
@@ -364,7 +446,7 @@ ColumnLayout {
 
   NText {
     Layout.fillWidth: true
-    text: pluginApi?.tr("settings.ipcNote") || "Bind this command to a keyboard shortcut in your compositor:\nqs -c noctalia-shell ipc call plugin:whisper toggle"
+    text: root.t("settings.ipcNote", "Bind this command to a keyboard shortcut in your compositor:\nqs -c noctalia-shell ipc call plugin:whisper toggle")
     color: Color.mOnSurfaceVariant
     pointSize: Style.fontSizeXS
     wrapMode: Text.Wrap
@@ -384,6 +466,10 @@ ColumnLayout {
     pluginApi.pluginSettings.systemPrompt = root.editSystemPrompt;
     pluginApi.pluginSettings.language = root.editLanguage;
     pluginApi.pluginSettings.maxHistoryLength = root.editMaxHistoryLength;
+    pluginApi.pluginSettings.liveMode = root.editLiveMode;
+    pluginApi.pluginSettings.vadSilenceDb = root.editVadSilenceDb;
+    pluginApi.pluginSettings.vadSilenceSec = root.editVadSilenceSec;
+    pluginApi.pluginSettings.vadMinSpeechSec = root.editVadMinSpeechSec;
     pluginApi.pluginSettings.panelDetached = root.editPanelDetached;
     pluginApi.pluginSettings.panelPosition = root.editPanelPosition;
     pluginApi.pluginSettings.panelHeightRatio = root.editPanelHeightRatio;

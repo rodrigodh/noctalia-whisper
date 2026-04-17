@@ -1,6 +1,20 @@
 .pragma library
 
 // ===================================
+// i18n fallback helper
+// ===================================
+// Noctalia's pluginApi.tr() returns "!!key!!" when the key is missing.
+// Wrap lookups so the caller's fallback is used in that case.
+function cleanTr(trValue, fallback) {
+  if (trValue && typeof trValue === "string" && trValue.length > 0
+      && !(trValue.length >= 4 && trValue.substring(0, 2) === "!!"
+           && trValue.substring(trValue.length - 2) === "!!")) {
+    return trValue;
+  }
+  return fallback;
+}
+
+// ===================================
 // Provider Constants
 // ===================================
 
@@ -302,6 +316,59 @@ function parseGeminiStream(data) {
     return { raw: line };
   }
   return null;
+}
+
+// ===================================
+// Live Mode: VAD Pipeline (ffmpeg silencedetect)
+// ===================================
+
+// One ffmpeg process records the session AND emits silencedetect events on stderr.
+// silencedetect is pts-aware — timestamps align perfectly with output-file offsets.
+function buildLivePipelineCommand(sessionFilePath, silenceDb, silenceSec) {
+  var db = (silenceDb !== undefined && silenceDb !== null) ? silenceDb : -30;
+  var sec = (silenceSec !== undefined && silenceSec !== null) ? silenceSec : 1.0;
+  var filter = "silencedetect=noise=" + db + "dB:d=" + sec;
+
+  var args = [
+    "ffmpeg", "-hide_banner", "-loglevel", "info",
+    "-y",
+    "-f", "pulse", "-i", "default",
+    "-ar", "16000", "-ac", "1",
+    "-af", filter,
+    sessionFilePath
+  ];
+  return { args: args };
+}
+
+// Parse one line of ffmpeg stderr. Returns null if not a silencedetect event.
+// Examples:
+//   [silencedetect @ 0x55a...] silence_start: 3.424
+//   [silencedetect @ 0x55a...] silence_end: 5.187 | silence_duration: 1.763
+function parseSilenceEvent(line) {
+  if (!line) return null;
+  var m = line.match(/silence_(start|end):\s*(-?[\d.]+)/);
+  if (!m) return null;
+  var t = parseFloat(m[2]);
+  if (isNaN(t) || t < 0) t = 0;
+  return { type: m[1], time: t };
+}
+
+// Extract a time slice [startSec, endSec] from the live session WAV into a chunk file.
+// -ignore_length 1 tolerates a growing source (header length field is stale).
+function buildChunkExtractCommand(sessionFilePath, chunkFilePath, startSec, endSec) {
+  var s = Math.max(0, startSec || 0);
+  var e = Math.max(s + 0.05, endSec || s + 0.05);
+  var args = [
+    "ffmpeg", "-hide_banner", "-loglevel", "error",
+    "-y",
+    "-ignore_length", "1",
+    "-ss", s.toFixed(3),
+    "-to", e.toFixed(3),
+    "-i", sessionFilePath,
+    "-ar", "16000", "-ac", "1",
+    chunkFilePath
+  ];
+  return { args: args };
 }
 
 // ===================================

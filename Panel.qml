@@ -5,6 +5,7 @@ import Quickshell
 import qs.Commons
 import qs.Widgets
 import qs.Services.UI
+import "WhisperLogic.js" as Logic
 
 Item {
   id: root
@@ -34,6 +35,7 @@ Item {
 
   // State from main instance
   readonly property bool isRecording: mainInstance?.isRecording || false
+  readonly property bool isLive: mainInstance?.isLive || false
   readonly property bool isTranscribing: mainInstance?.isTranscribing || false
   readonly property bool isGenerating: mainInstance?.isGenerating || false
   readonly property string currentResponse: mainInstance?.currentResponse || ""
@@ -42,6 +44,13 @@ Item {
   readonly property string errorMessage: mainInstance?.errorMessage || ""
   readonly property var messages: mainInstance?.messages || []
   readonly property real recordingDuration: mainInstance?.recordingDuration || 0
+  readonly property string lastHeardText: mainInstance?.lastHeardText || ""
+
+  // i18n helper: prefer Main's t() (which cleans !!key!! misses); inline fallback if mainInstance not ready.
+  function t(key, fallback) {
+    if (mainInstance && mainInstance.t) return mainInstance.t(key, fallback);
+    return Logic.cleanTr(pluginApi ? pluginApi.tr(key) : null, fallback);
+  }
 
   // Focus input when panel shows
   onVisibleChanged: {
@@ -50,9 +59,9 @@ Item {
         if (inputField) inputField.forceActiveFocus();
       });
     } else {
-      // Cancel recording when panel closes
-      if (mainInstance && mainInstance.isRecording) {
-        mainInstance.cancelRecording();
+      if (mainInstance) {
+        if (mainInstance.isLive) mainInstance.stopLive();
+        if (mainInstance.isRecording) mainInstance.cancelRecording();
       }
     }
   }
@@ -88,13 +97,13 @@ Item {
 
           NIcon {
             icon: "microphone"
-            color: Color.mPrimary
+            color: root.isLive ? Color.mError : Color.mPrimary
             pointSize: Style.fontSizeL
           }
 
           NText {
             Layout.fillWidth: true
-            text: pluginApi?.tr("panel.title") || "Whisper"
+            text: root.t("panel.title", "Whisper")
             font.weight: Style.fontWeightBold
             pointSize: Style.fontSizeL
             color: Color.mOnSurface
@@ -113,6 +122,64 @@ Item {
             pointSize: Style.fontSizeXS
           }
 
+          // ==== Live toggle pill ====
+          Rectangle {
+            id: liveBtn
+            Layout.preferredHeight: 28
+            Layout.preferredWidth: liveRow.implicitWidth + Style.marginM * 2
+            radius: height / 2
+            color: root.isLive
+              ? Color.mError
+              : (liveBtnMouse.containsMouse ? Qt.alpha(Color.mError, 0.18) : Qt.alpha(Color.mError, 0.08))
+            border.color: root.isLive ? Color.mError : Qt.alpha(Color.mError, 0.4)
+            border.width: 1
+
+            Behavior on color { ColorAnimation { duration: 150 } }
+
+            RowLayout {
+              id: liveRow
+              anchors.centerIn: parent
+              spacing: 6
+
+              Rectangle {
+                width: 8
+                height: 8
+                radius: 4
+                color: root.isLive ? Color.mOnPrimary : Color.mError
+                SequentialAnimation on opacity {
+                  running: root.isLive
+                  loops: Animation.Infinite
+                  NumberAnimation { from: 1.0; to: 0.25; duration: 500; easing.type: Easing.InOutSine }
+                  NumberAnimation { from: 0.25; to: 1.0; duration: 500; easing.type: Easing.InOutSine }
+                }
+              }
+
+              NText {
+                text: root.isLive
+                  ? root.t("panel.liveOn", "LIVE")
+                  : root.t("panel.liveStart", "Start Live")
+                color: root.isLive ? Color.mOnPrimary : Color.mError
+                pointSize: Style.fontSizeXS
+                font.weight: Style.fontWeightBold
+              }
+            }
+
+            MouseArea {
+              id: liveBtnMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                if (mainInstance) mainInstance.toggleLive();
+              }
+            }
+
+            ToolTip.visible: liveBtnMouse.containsMouse
+            ToolTip.text: root.isLive
+              ? root.t("panel.liveStop", "Stop Live")
+              : root.t("panel.liveStart", "Start Live")
+          }
+
           // Clear history button
           NIconButton {
             icon: "trash"
@@ -125,38 +192,81 @@ Item {
       }
 
       // ==================
-      // Recording Indicator
+      // Live status strip (what we last heard)
       // ==================
       Rectangle {
-        id: recordingIndicator
         Layout.fillWidth: true
-        Layout.preferredHeight: recordingContent.implicitHeight + Style.marginL * 2
-        visible: root.isRecording || root.isTranscribing
-        color: root.isRecording ? Qt.alpha(Color.mError, 0.1) : Qt.alpha(Color.mPrimary, 0.1)
+        Layout.preferredHeight: heardRow.implicitHeight + Style.marginS * 2
+        visible: root.isLive && root.lastHeardText !== ""
+        color: Qt.alpha(Color.mPrimary, 0.08)
+        radius: Style.radiusS
+        border.color: Qt.alpha(Color.mPrimary, 0.25)
+        border.width: 1
+
+        RowLayout {
+          id: heardRow
+          anchors.fill: parent
+          anchors.margins: Style.marginS
+          spacing: Style.marginS
+
+          NText {
+            text: root.t("panel.heardLabel", "Heard") + ":"
+            color: Color.mPrimary
+            pointSize: Style.fontSizeXS
+            font.weight: Style.fontWeightBold
+          }
+
+          NText {
+            Layout.fillWidth: true
+            text: root.lastHeardText
+            color: Color.mOnSurfaceVariant
+            pointSize: Style.fontSizeXS
+            elide: Text.ElideRight
+            maximumLineCount: 2
+            wrapMode: Text.Wrap
+          }
+        }
+      }
+
+      // ==================
+      // Status indicator (covers PTT + Live states)
+      // ==================
+      Rectangle {
+        id: statusIndicator
+        Layout.fillWidth: true
+        Layout.preferredHeight: statusContent.implicitHeight + Style.marginL * 2
+        visible: root.isRecording || root.isTranscribing || root.isLive
+        color: {
+          if (root.isRecording) return Qt.alpha(Color.mError, 0.1);
+          if (root.isLive) return Qt.alpha(Color.mError, 0.07);
+          return Qt.alpha(Color.mPrimary, 0.1);
+        }
         radius: Style.radiusL
-        border.color: root.isRecording ? Qt.alpha(Color.mError, 0.3) : Qt.alpha(Color.mPrimary, 0.3)
+        border.color: {
+          if (root.isRecording) return Qt.alpha(Color.mError, 0.3);
+          if (root.isLive) return Qt.alpha(Color.mError, 0.25);
+          return Qt.alpha(Color.mPrimary, 0.3);
+        }
         border.width: 1
 
         ColumnLayout {
-          id: recordingContent
+          id: statusContent
           anchors.centerIn: parent
           spacing: Style.marginM
 
-          // Animated recording dot
           RowLayout {
             Layout.alignment: Qt.AlignHCenter
             spacing: Style.marginS
 
             Rectangle {
-              id: recordingDot
               width: 12
               height: 12
               radius: 6
-              color: root.isRecording ? Color.mError : Color.mPrimary
-              visible: root.isRecording
+              color: (root.isRecording || root.isLive) ? Color.mError : Color.mPrimary
+              visible: root.isRecording || root.isLive
 
               SequentialAnimation on opacity {
-                running: root.isRecording
+                running: root.isRecording || root.isLive
                 loops: Animation.Infinite
                 NumberAnimation { from: 1.0; to: 0.2; duration: 500; easing.type: Easing.InOutSine }
                 NumberAnimation { from: 0.2; to: 1.0; duration: 500; easing.type: Easing.InOutSine }
@@ -168,7 +278,6 @@ Item {
               icon: "loader-2"
               color: Color.mPrimary
               pointSize: Style.fontSizeL
-
               RotationAnimation on rotation {
                 running: root.isTranscribing
                 from: 0; to: 360; duration: 1000; loops: Animation.Infinite
@@ -181,45 +290,42 @@ Item {
                   var secs = Math.floor(root.recordingDuration);
                   var mins = Math.floor(secs / 60);
                   secs = secs % 60;
-                  return (pluginApi?.tr("panel.recording") || "Recording") + "  " +
+                  return root.t("panel.recording", "Recording") + "  " +
                     (mins < 10 ? "0" : "") + mins + ":" + (secs < 10 ? "0" : "") + secs;
                 }
                 if (root.isTranscribing) {
-                  return pluginApi?.tr("panel.transcribing") || "Transcribing...";
+                  return root.t("panel.transcribing", "Transcribing...");
+                }
+                if (root.isLive) {
+                  return root.t("panel.listening", "Listening...");
                 }
                 return "";
               }
-              color: root.isRecording ? Color.mError : Color.mPrimary
+              color: (root.isRecording || root.isLive) ? Color.mError : Color.mPrimary
               pointSize: Style.fontSizeM
               font.weight: Style.fontWeightBold
             }
           }
 
-          // Audio level visualization (simple bars)
+          // Audio-level bars (visible while any mic-active state is true)
           Row {
             Layout.alignment: Qt.AlignHCenter
             spacing: 3
-            visible: root.isRecording
+            visible: root.isRecording || root.isLive
 
             Repeater {
               model: 12
               Rectangle {
                 width: 4
-                height: {
-                  // Animated random heights to simulate audio levels
-                  var base = 8;
-                  var max = 28;
-                  return base + Math.random() * (max - base);
-                }
+                height: 8 + Math.random() * 20
                 radius: 2
                 color: Color.mError
                 opacity: 0.7
 
-                // Re-randomize heights periodically
                 Timer {
                   interval: 100 + Math.random() * 100
                   repeat: true
-                  running: root.isRecording
+                  running: root.isRecording || root.isLive
                   onTriggered: parent.height = 8 + Math.random() * 20
                 }
 
@@ -230,11 +336,11 @@ Item {
             }
           }
 
-          // Stop button
+          // PTT-only stop button (Live is controlled from the header)
           NButton {
             Layout.alignment: Qt.AlignHCenter
             visible: root.isRecording
-            text: pluginApi?.tr("panel.stopRecording") || "Stop & Send"
+            text: root.t("panel.stopRecording", "Stop & Send")
             backgroundColor: Color.mError
             textColor: Color.mOnPrimary
             hoverColor: Qt.lighter(Color.mError, 1.2)
@@ -259,7 +365,7 @@ Item {
         // Empty state
         Item {
           anchors.fill: parent
-          visible: messages.length === 0 && !root.isGenerating && !root.isRecording && !root.isTranscribing
+          visible: messages.length === 0 && !root.isGenerating && !root.isRecording && !root.isTranscribing && !root.isLive
 
           ColumnLayout {
             anchors.centerIn: parent
@@ -275,7 +381,7 @@ Item {
 
             NText {
               Layout.alignment: Qt.AlignHCenter
-              text: pluginApi?.tr("panel.emptyTitle") || "Ready to listen"
+              text: root.t("panel.emptyTitle", "Ready to listen")
               color: Color.mOnSurfaceVariant
               pointSize: Style.fontSizeM
               applyUiScale: false
@@ -284,7 +390,7 @@ Item {
 
             NText {
               Layout.alignment: Qt.AlignHCenter
-              text: pluginApi?.tr("panel.emptyHint") || "Click the record button or use your keyboard shortcut"
+              text: root.t("panel.emptyHint", "Click Live, press your keybind, or type a message")
               color: Color.mOnSurfaceVariant
               pointSize: Style.fontSizeS
               applyUiScale: false
@@ -292,7 +398,6 @@ Item {
           }
         }
 
-        // Chat Flickable
         Flickable {
           id: chatFlickable
           anchors.fill: parent
@@ -351,12 +456,11 @@ Item {
                 pluginApi: root.pluginApi
                 onCopyRequested: function (text) {
                   Quickshell.clipboardText = text;
-                  ToastService.showNotice(pluginApi?.tr("toast.copied") || "Copied!");
+                  ToastService.showNotice(root.t("toast.copied", "Copied!"));
                 }
               }
             }
 
-            // Streaming response bubble
             MessageBubble {
               width: messageColumn.width
               visible: root.isGenerating && currentResponse.trim() !== ""
@@ -371,7 +475,6 @@ Item {
           }
         }
 
-        // Scroll to bottom button
         Rectangle {
           anchors.right: parent.right
           anchors.bottom: parent.bottom
@@ -449,25 +552,23 @@ Item {
           anchors.margins: Style.marginS
           spacing: Style.marginS
 
-          // Record button
+          // Primary mic button — Live toggle (or PTT stop when PTT is active)
           Rectangle {
             width: 40
             height: 40
             radius: 20
             color: {
-              if (root.isRecording) return Color.mError;
+              if (root.isRecording || root.isLive) return Color.mError;
               if (recordBtnMouse.containsMouse) return Qt.alpha(Color.mPrimary, 0.2);
               return Qt.alpha(Color.mPrimary, 0.1);
             }
 
-            Behavior on color {
-              ColorAnimation { duration: 150 }
-            }
+            Behavior on color { ColorAnimation { duration: 150 } }
 
             NIcon {
               anchors.centerIn: parent
-              icon: root.isRecording ? "player-stop" : "microphone"
-              color: root.isRecording ? Color.mOnPrimary : Color.mPrimary
+              icon: (root.isRecording || root.isLive) ? "player-stop" : "microphone"
+              color: (root.isRecording || root.isLive) ? Color.mOnPrimary : Color.mPrimary
               pointSize: Style.fontSizeM
             }
 
@@ -478,14 +579,17 @@ Item {
               cursorShape: Qt.PointingHandCursor
               enabled: !root.isTranscribing
               onClicked: {
-                if (mainInstance) mainInstance.toggleRecording();
+                if (!mainInstance) return;
+                mainInstance.primaryToggle();
               }
             }
 
             ToolTip.visible: recordBtnMouse.containsMouse
-            ToolTip.text: root.isRecording
-              ? (pluginApi?.tr("panel.stopRecording") || "Stop Recording")
-              : (pluginApi?.tr("panel.startRecording") || "Start Recording")
+            ToolTip.text: {
+              if (root.isLive) return root.t("panel.liveStop", "Stop Live");
+              if (root.isRecording) return root.t("panel.stopRecording", "Stop Recording");
+              return root.t("panel.liveStart", "Start Live");
+            }
           }
 
           // Text input
@@ -496,13 +600,14 @@ Item {
             TextArea {
               id: inputField
               text: mainInstance?.chatInputText || ""
-              placeholderText: pluginApi?.tr("panel.placeholder") || "Type a message or press record..."
+              placeholderText: root.t("panel.placeholder", "Type a message, or press Live to start listening...")
               placeholderTextColor: Color.mOnSurfaceVariant
               color: Color.mOnSurface
               font.pointSize: Style.fontSizeM
               wrapMode: TextArea.Wrap
               background: null
               selectByMouse: true
+              // Typing is still allowed while Live is running — user may want to type a follow-up.
               enabled: !root.isGenerating && !root.isRecording && !root.isTranscribing
 
               onTextChanged: {
@@ -529,8 +634,8 @@ Item {
             colorFg: root.isGenerating ? Color.mError : (inputField.text.trim() !== "" ? Color.mPrimary : Color.mOnSurfaceVariant)
             enabled: root.isGenerating || inputField.text.trim() !== ""
             tooltipText: root.isGenerating
-              ? (pluginApi?.tr("panel.stopGenerating") || "Stop")
-              : (pluginApi?.tr("panel.send") || "Send")
+              ? root.t("panel.stopGenerating", "Stop")
+              : root.t("panel.send", "Send")
             onClicked: {
               if (root.isGenerating) {
                 if (mainInstance) mainInstance.stopGeneration();
