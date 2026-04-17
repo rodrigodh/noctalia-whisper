@@ -364,7 +364,10 @@ Item {
     var ts = Date.now();
     root.liveSessionFilePath = "/tmp/whisper-live-" + ts + ".wav";
     root.liveSessionStartMs = ts;
-    root.lastSilenceEndTime = -1;
+    // Start assuming speech is in progress from t=0. Covers the common
+    // "user speaks immediately when Live starts" case — otherwise the
+    // first real silence_end would never fire and we'd never get a chunk.
+    root.lastSilenceEndTime = 0;
     root.liveChunkCounter = 0;
     root.pendingChunks = [];
     root.isChunkPipelineBusy = false;
@@ -375,6 +378,11 @@ Item {
     root.errorMessage = "";
     root.lastHeardText = "";
     root.isLive = true;
+
+    // Arm the max-speech safety timer now so that even if the VAD never
+    // emits silence_end (continuous speech) the force-break eventually fires.
+    maxSpeechTimer.interval = Math.max(1000, Math.round(root.vadMaxSpeechSec * 1000));
+    maxSpeechTimer.restart();
 
     var recCmd = Logic.buildSessionRecorderCommand(root.liveSessionFilePath);
     var vadCmd = Logic.buildVadMonitorCommand(root.vadSilenceDb, root.vadSilenceSec);
