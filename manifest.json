@@ -36,7 +36,7 @@
       "vadSilenceDb": -18,
       "vadSilenceSec": 1.0,
       "vadMinSpeechSec": 0.7,
-      "vadMaxSpeechSec": 10.0,
+      "vadMaxSpeechSec": 12.0,
       "panelDetached": true,
       "panelPosition": "center",
       "panelHeightRatio": 0.75,

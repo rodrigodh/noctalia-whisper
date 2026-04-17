@@ -76,7 +76,7 @@ Item {
   readonly property real vadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -18
   readonly property real vadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
   readonly property real vadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.7
-  readonly property real vadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 10.0
+  readonly property real vadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 12.0
 
   // API Keys - env vars take priority
   readonly property string envGroqKey: Quickshell.env("WHISPER_GROQ_API_KEY") || ""
@@ -261,7 +261,7 @@ Item {
   }
 
   // =====================
-  // Live Mode: single ffmpeg (record + silencedetect)
+  // Live Mode: pw-record (session file) + ffmpeg silencedetect (VAD)
   // =====================
 
   // Safety net: if the VAD hasn't reported silence_start after `vadMaxSpeechSec`
@@ -302,10 +302,37 @@ Item {
     processNextChunk();
   }
 
+  // Session recorder: pw-record writes a growing WAV that ffmpeg can
+  // reliably chunk-extract from while still being written.
   Process {
-    id: livePipelineProcess
+    id: sessionRecorderProcess
 
-    // silencedetect logs go to stderr — parse line-by-line in real time.
+    onExited: function (exitCode, exitStatus) {
+      Logger.i("Whisper", "Session recorder exited: code=" + exitCode);
+      // If the recorder dies unexpectedly while Live is on, the whole pipeline
+      // is useless — stop cleanly.
+      if (root.isLive && exitCode !== 0) {
+        root.liveFailed = true;
+        root.errorMessage = root.t("toast.liveFailed", "Live mode failed");
+        ToastService.showError(root.errorMessage);
+        root.stopLive();
+      }
+      // Cleanup is gated on liveSessionFilePath still being set so we don't
+      // race a still-running chunk extract.
+      Qt.callLater(function () {
+        if (!root.isLive && root.liveSessionFilePath) {
+          Quickshell.execDetached(["rm", "-f", root.liveSessionFilePath]);
+          root.liveSessionFilePath = "";
+        }
+      });
+    }
+  }
+
+  // VAD monitor: ffmpeg with silencedetect → -f null. No output file,
+  // events go to stderr and get parsed line-by-line.
+  Process {
+    id: vadProcess
+
     stderr: SplitParser {
       onRead: function (data) {
         var evt = Logic.parseSilenceEvent(data);
@@ -314,22 +341,13 @@ Item {
     }
 
     onExited: function (exitCode, exitStatus) {
-      Logger.i("Whisper", "Live pipeline exited: code=" + exitCode);
-      var wasLive = root.isLive;
-      root.isLive = false;
-      // If ffmpeg died unexpectedly while we thought we were live, surface an error.
-      if (wasLive && exitCode !== 0) {
+      Logger.i("Whisper", "VAD monitor exited: code=" + exitCode);
+      if (root.isLive && exitCode !== 0) {
         root.liveFailed = true;
         root.errorMessage = root.t("toast.liveFailed", "Live mode failed");
         ToastService.showError(root.errorMessage);
+        root.stopLive();
       }
-      // Leave session file around briefly in case extract is still running, then clean.
-      Qt.callLater(function () {
-        if (root.liveSessionFilePath) {
-          Quickshell.execDetached(["rm", "-f", root.liveSessionFilePath]);
-          root.liveSessionFilePath = "";
-        }
-      });
     }
   }
 
@@ -358,23 +376,27 @@ Item {
     root.lastHeardText = "";
     root.isLive = true;
 
-    var cmd = Logic.buildLivePipelineCommand(root.liveSessionFilePath,
-                                             root.vadSilenceDb,
-                                             root.vadSilenceSec);
+    var recCmd = Logic.buildSessionRecorderCommand(root.liveSessionFilePath);
+    var vadCmd = Logic.buildVadMonitorCommand(root.vadSilenceDb, root.vadSilenceSec);
     Logger.i("Whisper", "Starting Live pipeline → " + root.liveSessionFilePath);
-    livePipelineProcess.command = cmd.args;
-    livePipelineProcess.running = true;
+    sessionRecorderProcess.command = recCmd.args;
+    sessionRecorderProcess.running = true;
+    vadProcess.command = vadCmd.args;
+    vadProcess.running = true;
     ToastService.showNotice(root.t("toast.liveStarted", "Live mode on"));
   }
 
   function stopLive() {
-    if (!root.isLive && !livePipelineProcess.running) return;
+    if (!root.isLive && !sessionRecorderProcess.running && !vadProcess.running) return;
     Logger.i("Whisper", "Stopping Live pipeline");
     root.isLive = false;
     maxSpeechTimer.stop();
     // Drop any queued chunks that haven't started yet.
     root.pendingChunks = [];
-    livePipelineProcess.running = false;
+    // Stop VAD first (fewer side effects); recorder second so any in-flight
+    // chunk extract can still find the session file on disk.
+    vadProcess.running = false;
+    sessionRecorderProcess.running = false;
     ToastService.showNotice(root.t("toast.liveStopped", "Live mode off"));
   }
 
@@ -383,7 +405,7 @@ Item {
     else startLive();
   }
 
-  // Called from livePipelineProcess.stderr
+  // Called from vadProcess.stderr
   function handleSilenceEvent(evt) {
     Logger.i("Whisper", "VAD: silence_" + evt.type + " @ " + evt.time.toFixed(2) + "s");
     if (evt.type === "end") {

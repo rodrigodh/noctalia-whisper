@@ -319,25 +319,46 @@ function parseGeminiStream(data) {
 }
 
 // ===================================
-// Live Mode: VAD Pipeline (ffmpeg silencedetect)
+// Live Mode: two-process pipeline
 // ===================================
+//
+// The single-ffmpeg approach (record + silencedetect in one process) looks
+// elegant but breaks in practice: ffmpeg's WAV muxer buffers 8-12 seconds
+// before first flush, partial files corrupt mid-extract, and early chunks
+// arrive at "empty file" state causing "Audio file is too short" errors
+// from Whisper. Splitting into two processes fixes all three:
+//
+//   Process A (pw-record): writes the session WAV. pw-record flushes
+//   progressively from t=0 and uses a clean 44-byte header that ffmpeg
+//   can read back while the file is still being written.
+//
+//   Process B (ffmpeg silencedetect to null): just emits VAD events on
+//   stderr, no output file. Drift vs process A is ≤ ~50 ms.
 
-// One ffmpeg process records the session AND emits silencedetect events on stderr.
-// silencedetect is pts-aware — timestamps align perfectly with output-file offsets.
-function buildLivePipelineCommand(sessionFilePath, silenceDb, silenceSec) {
-  var db = (silenceDb !== undefined && silenceDb !== null) ? silenceDb : -30;
+function buildSessionRecorderCommand(sessionFilePath) {
+  return {
+    args: [
+      "pw-record", "--media-category", "Capture",
+      "--rate", "16000", "--channels", "1",
+      sessionFilePath
+    ]
+  };
+}
+
+function buildVadMonitorCommand(silenceDb, silenceSec) {
+  var db = (silenceDb !== undefined && silenceDb !== null) ? silenceDb : -18;
   var sec = (silenceSec !== undefined && silenceSec !== null) ? silenceSec : 1.0;
   var filter = "silencedetect=noise=" + db + "dB:d=" + sec;
-
-  var args = [
-    "ffmpeg", "-hide_banner", "-loglevel", "info",
-    "-y",
-    "-f", "pulse", "-i", "default",
-    "-ar", "16000", "-ac", "1",
-    "-af", filter,
-    sessionFilePath
-  ];
-  return { args: args };
+  return {
+    args: [
+      "ffmpeg", "-hide_banner", "-loglevel", "info",
+      "-nostats",
+      "-f", "pulse", "-i", "default",
+      "-ar", "16000", "-ac", "1",
+      "-af", filter,
+      "-f", "null", "-"
+    ]
+  };
 }
 
 // Parse one line of ffmpeg stderr. Returns null if not a silencedetect event.

@@ -29,7 +29,7 @@ ColumnLayout {
   property real editVadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -30
   property real editVadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
   property real editVadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.7
-  property real editVadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 10.0
+  property real editVadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 12.0
 
   // Panel Settings
   property bool editPanelDetached: pluginApi?.pluginSettings?.panelDetached ?? true

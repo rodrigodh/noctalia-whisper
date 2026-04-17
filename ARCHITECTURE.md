@@ -19,27 +19,38 @@ Everything user-visible lives in Panel/BarWidget/Settings. All state and process
 
 ## Live mode pipeline
 
-The primary experience. One long-running `ffmpeg` process does two jobs:
+Two processes share the default pulse source. They're intentionally split:
 
 ```
-pulse ──▶ ffmpeg (records + silencedetect)
-           │
-           ├── stdout: /tmp/whisper-live-<ts>.wav    (the session WAV, grows for the whole session)
-           │
-           └── stderr: [silencedetect] silence_start: T / silence_end: T  (parsed by SplitParser)
+pulse ──┬──▶ pw-record ───▶ /tmp/whisper-live-<ts>.wav   (grows progressively, 44-byte WAV header)
+        │
+        └──▶ ffmpeg -af silencedetect -f null -
+                │
+                └── stderr: [silencedetect] silence_start: T / silence_end: T
 ```
 
-Command shape (from `Logic.buildLivePipelineCommand`):
+**Why two processes?** The "elegant" single-ffmpeg approach (record + silencedetect in one pipeline) has three fatal problems in practice:
+
+1. ffmpeg's WAV muxer buffers **8–12 seconds** before first flush — so the session file is 0 bytes during the opening window and any early chunk extract errors with "Invalid data found in RIFF header".
+2. Partial WAV files have a placeholder RIFF size that makes ffmpeg's WAV demuxer emit "Packet corrupt" mid-extract and truncate the output.
+3. The resulting chunks hit Whisper's `Audio file is too short` error even for perfectly-valid 2-3s speech bursts.
+
+`pw-record` writes a clean 44-byte header and flushes progressively from t=0, which `ffmpeg -ignore_length 1 -ss X -t Y -i session.wav chunk.wav` reads back reliably.
+
+The two processes' clocks drift by ~50–100 ms (both are pulse-based and start within one `Qt.callLater`). That drift is a tiny constant offset on chunk boundaries — acceptable given chunk durations of seconds.
+
+Commands (from `WhisperLogic.js`):
 
 ```
-ffmpeg -hide_banner -loglevel info -y \
-       -f pulse -i default \
-       -ar 16000 -ac 1 \
+# Session recorder — pw-record
+pw-record --media-category Capture --rate 16000 --channels 1 /tmp/whisper-live-<ts>.wav
+
+# VAD monitor — ffmpeg with null sink, events on stderr
+ffmpeg -hide_banner -loglevel info -nostats \
+       -f pulse -i default -ar 16000 -ac 1 \
        -af silencedetect=noise=<db>dB:d=<sec> \
-       /tmp/whisper-live-<ts>.wav
+       -f null -
 ```
-
-Using one process instead of two means `silencedetect`'s timestamps are pts-based and align exactly with byte offsets in the output WAV — a chunk `[startSec, endSec]` can be extracted later without timing drift.
 
 ### Silence events → speech chunks
 
@@ -70,13 +81,16 @@ When a chunk enters the queue, `processNextChunk()` fires. It runs strictly sequ
 Per chunk:
 
 ```
-1. Extract   ffmpeg -ignore_length 1 -ss S -to E -i session.wav chunk.wav
+1. Extract   ffmpeg -ignore_length 1 -ss S -t (E-S) -i session.wav chunk.wav
 2. Transcribe  curl ... api.groq.com/v1/audio/transcriptions → JSON { text: "..." }
-3. Send       addMessage("user", text) then stream to the selected LLM
-4. On LLM exit  afterLlmDone() releases the queue lock and recurses
+3. Filter    Logic.isLikelyHallucination(text) drops ".", "you", "Thanks for watching", etc.
+4. Send       addMessage("user", text) then stream to the selected LLM
+5. On LLM exit  afterLlmDone() releases the queue lock and recurses
 ```
 
-`-ignore_length 1` tolerates the growing (unfinalized) WAV header on the live session file.
+Extractor uses `-t <duration>` (not `-to <end>`): a stale RIFF size field in the live session file clamps `-to` to zero-duration output, but `-t` just reads a byte count. Combined with `-ignore_length 1`, this handles the growing source cleanly.
+
+If no silence_start arrives for `vadMaxSpeechSec` (default 12 s) of continuous speech, `forceChunkBreak()` fires: it estimates the current pw-record position from wall-clock delta, cuts a chunk there, and resets the speech-start anchor. Without this safety net, ambient noise keeping levels above the silence threshold can produce 30-second "chunks" that Whisper reliably hallucinates on (classic repeating-sentence loop).
 
 ### Serialization and failure paths
 
