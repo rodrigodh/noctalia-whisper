@@ -82,6 +82,8 @@
   "settings.vadSilenceSecDesc": "How long you must pause (seconds) before the assistant answers.",
   "settings.vadMinSpeechSec": "Min speech length",
   "settings.vadMinSpeechSecDesc": "Ignore speech bursts shorter than this (filters coughs, clicks).",
+  "settings.vadMaxSpeechSec": "Max speech length",
+  "settings.vadMaxSpeechSecDesc": "Safety net: force a chunk break after this many seconds of continuous speech, even if no pause was detected. Prevents Whisper hallucinations on long audio. Lower = snappier but may cut sentences; higher = longer context but risk of hallucination.",
 
   "settings.panelSection": "Panel Layout",
   "settings.panelDetached": "Detached Panel",

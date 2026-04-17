@@ -355,20 +355,62 @@ function parseSilenceEvent(line) {
 
 // Extract a time slice [startSec, endSec] from the live session WAV into a chunk file.
 // -ignore_length 1 tolerates a growing source (header length field is stale).
+// Use -t <duration> instead of -to <end>: when the source WAV's RIFF header
+// hasn't been finalised, -to gets clamped to the (broken) reported duration
+// and yields empty output. -t reads byte-stream bytes for a fixed duration
+// regardless of what the header claims.
 function buildChunkExtractCommand(sessionFilePath, chunkFilePath, startSec, endSec) {
   var s = Math.max(0, startSec || 0);
   var e = Math.max(s + 0.05, endSec || s + 0.05);
+  var duration = e - s;
   var args = [
     "ffmpeg", "-hide_banner", "-loglevel", "error",
     "-y",
     "-ignore_length", "1",
     "-ss", s.toFixed(3),
-    "-to", e.toFixed(3),
+    "-t", duration.toFixed(3),
     "-i", sessionFilePath,
     "-ar", "16000", "-ac", "1",
     chunkFilePath
   ];
   return { args: args };
+}
+
+// ===================================
+// Whisper hallucination filter
+// ===================================
+// Groq Whisper reliably produces a handful of phantom transcripts when fed
+// chunks that contain only low-level noise or silence: a bare ".", "you",
+// "Thanks for watching", etc. Filter them out before they reach the LLM.
+function isLikelyHallucination(text) {
+  if (!text) return true;
+  var trimmed = text.trim();
+  if (trimmed === "") return true;
+
+  // Count characters that are neither whitespace nor common punctuation.
+  // Keeps non-latin scripts (pt/es/ja/etc.) because they're neither.
+  var punct = ".,!?;:()[]{}'\"`~-_<>/\\|@#$%^&*+=";
+  var meaningful = 0;
+  for (var i = 0; i < trimmed.length; i++) {
+    var c = trimmed.charAt(i);
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") continue;
+    if (punct.indexOf(c) !== -1) continue;
+    meaningful++;
+  }
+  if (meaningful < 3) return true;
+
+  // Known Whisper phantoms on silent/near-silent audio.
+  var normalized = trimmed.toLowerCase().replace(/[.,!?;:'"]/g, "").trim();
+  var phantoms = [
+    "you", "thanks", "thank you",
+    "thanks for watching", "thank you for watching",
+    "bye", "bye bye", "music", "applause",
+    "subtitles by the amaraorg community"
+  ];
+  for (var j = 0; j < phantoms.length; j++) {
+    if (normalized === phantoms[j]) return true;
+  }
+  return false;
 }
 
 // ===================================

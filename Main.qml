@@ -69,13 +69,14 @@ Item {
   readonly property string systemPrompt: pluginApi?.pluginSettings?.systemPrompt
                                         || pluginApi?.manifest?.metadata?.defaultSettings?.systemPrompt
                                         || ""
-  readonly property string language: pluginApi?.pluginSettings?.language || "en"
+  readonly property string language: pluginApi?.pluginSettings?.language || "auto"
 
   // Live/VAD config (with manifest defaults as fallback)
   readonly property bool liveModeDefault: pluginApi?.pluginSettings?.liveMode ?? true
   readonly property real vadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -18
   readonly property real vadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
-  readonly property real vadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.5
+  readonly property real vadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.7
+  readonly property real vadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 10.0
 
   // API Keys - env vars take priority
   readonly property string envGroqKey: Quickshell.env("WHISPER_GROQ_API_KEY") || ""
@@ -262,6 +263,45 @@ Item {
   // =====================
   // Live Mode: single ffmpeg (record + silencedetect)
   // =====================
+
+  // Safety net: if the VAD hasn't reported silence_start after `vadMaxSpeechSec`
+  // of continuous speech, force a chunk break so Whisper isn't handed a 30s+
+  // monologue (which it reliably hallucinates on).
+  Timer {
+    id: maxSpeechTimer
+    repeat: false
+    onTriggered: root.forceChunkBreak()
+  }
+
+  function forceChunkBreak() {
+    if (!root.isLive) return;
+    if (root.lastSilenceEndTime < 0) return; // no speech in progress
+
+    // Estimate ffmpeg's current position from wall clock. Slight drift is fine;
+    // `-ignore_length 1 -t <dur>` reads byte-stream bytes and tolerates short reads.
+    var nowFfmpegTime = (Date.now() - root.liveSessionStartMs) / 1000;
+    if (nowFfmpegTime <= root.lastSilenceEndTime) return;
+
+    var speechStart = root.lastSilenceEndTime;
+    var speechEnd = nowFfmpegTime;
+    var dur = speechEnd - speechStart;
+    if (dur < root.vadMinSpeechSec) return;
+
+    Logger.i("Whisper", "VAD: force break at " + speechEnd.toFixed(2) + "s (max speech " + root.vadMaxSpeechSec + "s reached)");
+    var chunkPath = "/tmp/whisper-live-chunk-" + root.liveSessionStartMs + "-" + root.liveChunkCounter + ".wav";
+    root.liveChunkCounter += 1;
+    root.pendingChunks = [...root.pendingChunks, {
+      path: chunkPath,
+      startSec: speechStart,
+      endSec: speechEnd
+    }];
+    // Continue treating the current moment as still-speaking.
+    root.lastSilenceEndTime = speechEnd;
+    maxSpeechTimer.interval = Math.max(1000, Math.round(root.vadMaxSpeechSec * 1000));
+    maxSpeechTimer.restart();
+    processNextChunk();
+  }
+
   Process {
     id: livePipelineProcess
 
@@ -331,6 +371,7 @@ Item {
     if (!root.isLive && !livePipelineProcess.running) return;
     Logger.i("Whisper", "Stopping Live pipeline");
     root.isLive = false;
+    maxSpeechTimer.stop();
     // Drop any queued chunks that haven't started yet.
     root.pendingChunks = [];
     livePipelineProcess.running = false;
@@ -346,10 +387,13 @@ Item {
   function handleSilenceEvent(evt) {
     Logger.i("Whisper", "VAD: silence_" + evt.type + " @ " + evt.time.toFixed(2) + "s");
     if (evt.type === "end") {
-      // Speech just started (silence ended).
+      // Speech just started (silence ended). Arm the max-speech safety timer.
       root.lastSilenceEndTime = evt.time;
+      maxSpeechTimer.interval = Math.max(1000, Math.round(root.vadMaxSpeechSec * 1000));
+      maxSpeechTimer.restart();
     } else if (evt.type === "start") {
-      // Speech just ended (silence started).
+      // Speech just ended (silence started). Real endpoint found → cancel safety timer.
+      maxSpeechTimer.stop();
       if (root.lastSilenceEndTime < 0) return; // no speech yet
       var speechStart = root.lastSilenceEndTime;
       var speechEnd = evt.time;
@@ -486,9 +530,9 @@ Item {
     }
 
     var text = (result.text || "").trim();
-    if (text === "") {
+    if (text === "" || Logic.isLikelyHallucination(text)) {
       if (source === "live") {
-        Logger.d("Whisper", "Live chunk produced empty transcript; skipping");
+        Logger.w("Whisper", "Dropping transcript as empty/hallucination: '" + text + "'");
         root.isChunkPipelineBusy = false;
         root.processNextChunk();
       } else {

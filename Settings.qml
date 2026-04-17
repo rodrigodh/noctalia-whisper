@@ -21,14 +21,15 @@ ColumnLayout {
   property var editApiKeys: pluginApi?.pluginSettings?.apiKeys || {}
   property real editTemperature: pluginApi?.pluginSettings?.temperature ?? 0.5
   property string editSystemPrompt: pluginApi?.pluginSettings?.systemPrompt || pluginApi?.manifest?.metadata?.defaultSettings?.systemPrompt || ""
-  property string editLanguage: pluginApi?.pluginSettings?.language || "en"
+  property string editLanguage: pluginApi?.pluginSettings?.language || "auto"
   property int editMaxHistoryLength: pluginApi?.pluginSettings?.maxHistoryLength || 50
 
   // Live / VAD Settings
   property bool editLiveMode: pluginApi?.pluginSettings?.liveMode ?? true
   property real editVadSilenceDb: pluginApi?.pluginSettings?.vadSilenceDb ?? -30
   property real editVadSilenceSec: pluginApi?.pluginSettings?.vadSilenceSec ?? 1.0
-  property real editVadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.5
+  property real editVadMinSpeechSec: pluginApi?.pluginSettings?.vadMinSpeechSec ?? 0.7
+  property real editVadMaxSpeechSec: pluginApi?.pluginSettings?.vadMaxSpeechSec ?? 10.0
 
   // Panel Settings
   property bool editPanelDetached: pluginApi?.pluginSettings?.panelDetached ?? true
@@ -344,6 +345,20 @@ ColumnLayout {
       value: root.editVadMinSpeechSec
       onValueChanged: root.editVadMinSpeechSec = value
     }
+
+    NLabel {
+      label: root.t("settings.vadMaxSpeechSec", "Max speech length") + ": " + root.editVadMaxSpeechSec.toFixed(0) + "s"
+      description: root.t("settings.vadMaxSpeechSecDesc", "Force a chunk break after this many seconds of continuous speech.")
+    }
+
+    NSlider {
+      Layout.fillWidth: true
+      from: 4
+      to: 30
+      stepSize: 1
+      value: root.editVadMaxSpeechSec
+      onValueChanged: root.editVadMaxSpeechSec = value
+    }
   }
 
   NDivider {
@@ -470,6 +485,7 @@ ColumnLayout {
     pluginApi.pluginSettings.vadSilenceDb = root.editVadSilenceDb;
     pluginApi.pluginSettings.vadSilenceSec = root.editVadSilenceSec;
     pluginApi.pluginSettings.vadMinSpeechSec = root.editVadMinSpeechSec;
+    pluginApi.pluginSettings.vadMaxSpeechSec = root.editVadMaxSpeechSec;
     pluginApi.pluginSettings.panelDetached = root.editPanelDetached;
     pluginApi.pluginSettings.panelPosition = root.editPanelPosition;
     pluginApi.pluginSettings.panelHeightRatio = root.editPanelHeightRatio;
